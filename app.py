@@ -115,117 +115,124 @@ with tabs[0]:
 
 # --- PESTAÑA 2: DESCARGAS ---
 # --- PESTAÑA 2: DESCARGAS AVANZADAS ---
-with tabs[1]:
-    st.header("Descarga Automatizada y Extracción DOM")
-    
-    if 'df_results' not in st.session_state:
-        st.info("Primero ejecuta una búsqueda en la 'Fase 1' para obtener artículos.")
-    else:
-        df = st.session_state['df_results']
+    with tabs[1]:
+        st.header("Descarga Automatizada y Extracción DOM")
         
-        # Ahora procesaremos todos los que tengan PDF URL, o intentaremos raspar el DOI
-        df_procesables = df[(df['PDF URL'] != "N/A") | (df['DOI'] != "")]
-        
-        st.metric(label="Artículos viables para extracción", value=len(df_procesables))
-        
-        if len(df_procesables) > 0:
-            if st.button("Iniciar Pipeline de Extracción (v4.1 Cloud)", type="primary"):
-                progress_bar = st.progress(0)
-                zip_buffer = io.BytesIO()
-                
-                if 'docs_buffers' not in st.session_state:
-                    st.session_state['docs_buffers'] = {} # Para la Fase 3
-
-                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+        if 'df_results' not in st.session_state:
+            st.info("Primero ejecuta una búsqueda en la 'Fase 1' para obtener artículos.")
+        else:
+            df = st.session_state['df_results']
+            df_procesables = df[(df['PDF URL'] != "N/A") | (df['DOI'] != "")]
+            st.metric(label="Artículos viables para extracción", value=len(df_procesables))
+            
+            if len(df_procesables) > 0:
+                if st.button("Iniciar Pipeline de Extracción (v4.2 Heurístico)", type="primary"):
+                    progress_bar = st.progress(0)
+                    zip_buffer = io.BytesIO()
                     
-                    with sync_playwright() as p:
-                        browser = p.chromium.launch(headless=True)
-                        context = browser.new_context(
-                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                        )
-                        
-                        # TUS INYECCIONES STEALTH (Aplicadas a todo el contexto)
-                        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                        context.add_init_script("window.navigator.chrome = { runtime: {} };")
-                        context.add_init_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});")
-                        
-                        total = len(df_procesables)
-                        
-                        for i, row in df_procesables.reset_index().iterrows():
-                            pmid = row['PMID']
-                            url_pdf = row['PDF URL']
-                            doi = row['DOI']
-                            titulo_limpio = "".join(x for x in str(row['Título'])[:30] if x.isalnum() or x.isspace()).replace(" ", "_")
-                            nombre_base = f"{pmid}_{titulo_limpio}"
+                    if 'docs_buffers' not in st.session_state:
+                        st.session_state['docs_buffers'] = {}
+
+                    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                        with sync_playwright() as p:
+                            browser = p.chromium.launch(headless=True)
+                            context = browser.new_context(
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                            )
                             
-                            # TU IDEA: UI Expander para logs detallados
-                            with st.expander(f"🔄 Procesando: {pmid} - {row['Título'][:40]}...", expanded=(i==0)):
-                                pdf_bytes = None
-                                texto_plano = None
+                            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                            context.add_init_script("window.navigator.chrome = { runtime: {} };")
+                            context.add_init_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});")
+                            
+                            total = len(df_procesables)
+                            
+                            for i, row in df_procesables.reset_index().iterrows():
+                                pmid = row['PMID']
+                                url_pdf = row['PDF URL']
+                                doi = row['DOI']
+                                titulo_limpio = "".join(x for x in str(row['Título'])[:30] if x.isalnum() or x.isspace()).replace(" ", "_")
+                                nombre_base = f"{pmid}_{titulo_limpio}"
                                 
-                                # Pipeline 1: Intento HTTP directo al PDF
-                                if url_pdf != "N/A":
-                                    st.write(f"🌐 Intentando descarga directa: `{url_pdf}`")
-                                    try:
-                                        resp = requests.get(url_pdf, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-                                        if resp.status_code == 200 and 'pdf' in resp.headers.get('Content-Type', '').lower():
-                                            pdf_bytes = resp.content
-                                            st.success("✅ PDF binario capturado en memoria.")
-                                    except Exception as e:
-                                        st.error(f"Fallo HTTP: {str(e)[:50]}")
-
-                                # Pipeline 2: Contingencia DOM -> TXT usando Playwright
-                                if not pdf_bytes and doi:
-                                    url_web = f"https://doi.org/{doi}"
-                                    st.warning(f"⚠️ PDF no disponible. Iniciando raspado DOM en: `{url_web}`")
+                                with st.expander(f"🔄 Procesando: {pmid} - {row['Título'][:40]}...", expanded=(i==0)):
+                                    pdf_bytes = None
+                                    texto_plano = None
                                     
-                                    page = context.new_page()
-                                    try:
-                                        page.goto(url_web, wait_until="networkidle", timeout=15000)
-                                        
-                                        # Tu script inyectado en JS para buscar contenedores de texto
-                                        texto_plano = page.evaluate("""() => {
-                                            let selectores = ['#body', '.html-content', 'article', '#mc', '.article-wrapper', '[role="main"]', '.FullText'];
-                                            let contenedor = null;
-                                            for (let sel of selectores) {
-                                                contenedor = document.querySelector(sel);
-                                                if (contenedor && contenedor.innerText.length > 500) break;
-                                            }
-                                            if (!contenedor) contenedor = document.body;
-                                            return contenedor ? contenedor.innerText : null;
-                                        }""")
-                                        
-                                        if texto_plano and len(texto_plano) > 500:
-                                            st.success("✅ Texto plano extraído de la estructura HTML.")
-                                        else:
-                                            texto_plano = None
-                                            st.error("❌ Fallo estructural. DOM ofuscado o contenido paywalled.")
-                                            
-                                    except Exception as e:
-                                        st.error(f"🔌 Error de navegación Playwright: {str(e)[:50]}")
-                                    finally:
-                                        page.close() # Limpieza estricta de memoria RAM
+                                    # Pipeline 1: Intento HTTP directo al PDF
+                                    if url_pdf != "N/A":
+                                        st.write(f"🌐 Intentando descarga directa: `{url_pdf}`")
+                                        try:
+                                            resp = requests.get(url_pdf, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                                            if resp.status_code == 200 and 'pdf' in resp.headers.get('Content-Type', '').lower():
+                                                pdf_bytes = resp.content
+                                                st.success("✅ PDF binario capturado en memoria.")
+                                        except Exception as e:
+                                            st.error(f"Fallo HTTP: {str(e)[:50]}")
 
-                                # Guardado en ZIP y Memoria (Stateless)
-                                if pdf_bytes:
-                                    zip_file.writestr(f"{nombre_base}.pdf", pdf_bytes)
-                                    st.session_state['docs_buffers'][pmid] = {"tipo": "pdf", "contenido": pdf_bytes}
-                                elif texto_plano:
-                                    zip_file.writestr(f"{nombre_base}.txt", texto_plano.encode('utf-8'))
-                                    st.session_state['docs_buffers'][pmid] = {"tipo": "txt", "contenido": texto_plano}
-                            
-                            progress_bar.progress((i + 1) / total)
-                            
-                        browser.close()
-                
-                st.success(f"🎉 Pipeline finalizado. Se han procesado {total} artículos.")
-                
-                st.download_button(
-                    label="📦 Descargar todos en ZIP",
-                    data=zip_buffer.getvalue(),
-                    file_name="extraccion_medica.zip",
-                    mime="application/zip"
-                )
+                                    # Pipeline 2: Contingencia DOM -> TXT usando Playwright
+                                    if not pdf_bytes and doi:
+                                        url_web = f"https://doi.org/{doi}"
+                                        st.warning(f"⚠️ PDF no disponible. Iniciando raspado DOM en: `{url_web}`")
+                                        
+                                        page = context.new_page()
+                                        try:
+                                            page.goto(url_web, wait_until="networkidle", timeout=15000)
+                                            
+                                            texto_plano = page.evaluate("""() => {
+                                                let selectores = ['#body', '.html-content', 'article', '#mc', '.article-wrapper', '[role="main"]', '.FullText'];
+                                                let contenedor = null;
+                                                for (let sel of selectores) {
+                                                    contenedor = document.querySelector(sel);
+                                                    if (contenedor && contenedor.innerText.length > 500) break;
+                                                }
+                                                if (!contenedor) contenedor = document.body;
+                                                return contenedor ? contenedor.innerText : null;
+                                            }""")
+                                            
+                                            if texto_plano and len(texto_plano) > 500:
+                                                # --- NUEVO: FILTRO DE CALIDAD Y ANTI-BOTS ---
+                                                texto_lower = texto_plano.lower()
+                                                firmas_waf = ["there was a problem providing the content", "reference number:", "cloudflare", "please contact our support team", "enable javascript", "access denied"]
+                                                
+                                                if any(firma in texto_lower for firma in firmas_waf):
+                                                    texto_plano = None
+                                                    st.error("❌ Extracción bloqueada: WAF o protección anti-bot (ScienceDirect/Elsevier) detectado.")
+                                                elif len(texto_plano) < 2500 and "introduction" not in texto_lower:
+                                                    texto_plano = None
+                                                    st.warning("⚠️ Extracción descartada: Solo se detectó el Abstract o un muro de pago oculto.")
+                                                else:
+                                                    st.success("✅ Texto completo válido extraído de la estructura HTML.")
+                                            else:
+                                                texto_plano = None
+                                                st.error("❌ Fallo estructural. DOM ofuscado o sin contenido.")
+                                                
+                                        except Exception as e:
+                                            st.error(f"🔌 Error de navegación Playwright: {str(e)[:50]}")
+                                        finally:
+                                            page.close()
+
+                                    # Guardado en ZIP y Memoria
+                                    if pdf_bytes:
+                                        zip_file.writestr(f"{nombre_base}.pdf", pdf_bytes)
+                                        st.session_state['docs_buffers'][pmid] = {"tipo": "pdf", "contenido": pdf_bytes}
+                                    elif texto_plano:
+                                        zip_file.writestr(f"{nombre_base}.txt", texto_plano.encode('utf-8'))
+                                        st.session_state['docs_buffers'][pmid] = {"tipo": "txt", "contenido": texto_plano}
+                                
+                                progress_bar.progress((i + 1) / total)
+                                
+                            browser.close()
+                    
+                    st.success(f"🎉 Pipeline finalizado. Se han procesado {total} artículos.")
+                    
+                    if len(st.session_state['docs_buffers']) > 0:
+                        st.download_button(
+                            label="📦 Descargar exitosos en ZIP",
+                            data=zip_buffer.getvalue(),
+                            file_name="extraccion_medica.zip",
+                            mime="application/zip"
+                        )
+                    else:
+                        st.error("Ningún artículo logró evadir los firewalls en esta ejecución.")
 
 # --- PESTAÑA 3: MARKDOWN (Cero-Disco + Subida Manual) ---
 with tabs[2]:
