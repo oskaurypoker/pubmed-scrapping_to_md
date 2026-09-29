@@ -7,6 +7,8 @@ import requests
 from Bio import Entrez
 from datetime import datetime
 from playwright.sync_api import sync_playwright
+import fitz  # PyMuPDF
+import pymupdf4llm
 
 # --- INYECCIÓN PARA STREAMLIT CLOUD ---
 @st.cache_resource
@@ -225,6 +227,53 @@ with tabs[1]:
                     mime="application/zip"
                 )
 
-# --- PESTAÑA 3: MARKDOWN ---
-with tabs[2]: 
-    st.info("En desarrollo...")
+# --- PESTAÑA 3: MARKDOWN (Cero-Disco) ---
+with tabs[2]:
+    st.header("Conversión a Markdown estructurado")
+    
+    if 'docs_buffers' not in st.session_state or not st.session_state['docs_buffers']:
+        st.info("No hay documentos en caché. Ejecuta las extracciones de la Fase 2 primero.")
+    else:
+        docs = st.session_state['docs_buffers']
+        st.metric("Documentos en memoria listos", len(docs))
+        
+        if st.button("Convertir a Markdown", type="primary"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            zip_md_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(zip_md_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                total = len(docs)
+                
+                for i, (pmid, data) in enumerate(docs.items()):
+                    status_text.text(f"Procesando estructuración para PMID: {pmid} ({i+1}/{total})")
+                    md_text = ""
+                    
+                    try:
+                        if data["tipo"] == "pdf":
+                            # Apertura de stream binario directo sin tocar disco
+                            doc = fitz.open(stream=data["contenido"], filetype="pdf")
+                            md_text = pymupdf4llm.to_markdown(doc)
+                            doc.close()
+                        elif data["tipo"] == "txt":
+                            # Decodificación UTF-8 para raspado de frontend
+                            md_text = data["contenido"].decode('utf-8')
+                        
+                        if md_text:
+                            zip_file.writestr(f"{pmid}.md", md_text.encode('utf-8'))
+                            
+                    except Exception as e:
+                        st.toast(f"Error de parsing en {pmid}: {str(e)[:50]}")
+                    
+                    progress_bar.progress((i + 1) / total)
+            
+            status_text.text("✅ Transformación a Markdown finalizada.")
+            st.success(f"Archivos .md compilados exitosamente en la RAM.")
+            
+            st.download_button(
+                label="📦 Descargar markdowns.zip",
+                data=zip_md_buffer.getvalue(),
+                file_name="markdowns.zip",
+                mime="application/zip"
+            )
