@@ -3,10 +3,9 @@ import streamlit as st
 import pandas as pd
 import requests
 from Bio import Entrez
+from datetime import datetime
 
 # --- INYECCIÓN PARA STREAMLIT CLOUD ---
-# Esto asegura que el navegador se descargue al encender el servidor.
-# st.cache_resource evita que se ejecute cada vez que el usuario hace clic.
 @st.cache_resource
 def install_playwright():
     os.system("playwright install chromium")
@@ -14,66 +13,78 @@ def install_playwright():
 install_playwright()
 # --------------------------------------
 
-# 1. Configuración inicial de Streamlit
 st.set_page_config(page_title="Procesador Médico", layout="wide")
 st.title("Procesador de Literatura Médica")
 
 tabs = st.tabs(["Fase 1: Búsqueda", "Fase 2: Descargas", "Fase 3: Markdown"])
 
 def get_evidence_level(pub_types):
-    """Mapea tipos de publicación a Nivel de Evidencia (1=Más alto, 5=Más bajo)"""
     types = [str(pt).lower() for pt in pub_types]
-    if any("meta-analysis" in t or "systematic review" in t for t in types):
-        return 1
-    elif any("randomized controlled trial" in t for t in types):
-        return 2
-    elif any("cohort" in t for t in types):
-        return 3
-    elif any("case-control" in t for t in types):
-        return 4
+    if any("meta-analysis" in t or "systematic review" in t for t in types): return 1
+    elif any("randomized controlled trial" in t for t in types): return 2
+    elif any("cohort" in t for t in types): return 3
+    elif any("case-control" in t for t in types): return 4
     return 5
 
 def check_unpaywall(doi, email):
-    """Consulta Unpaywall para verificar acceso abierto y obtener link al PDF"""
-    if not doi:
-        return False, None
+    if not doi: return False, None
     try:
         url = f"https://api.unpaywall.org/v2/{doi}?email={email}"
         resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             is_oa = data.get("is_oa", False)
-            pdf_url = data.get("best_oa_location", {}).get("url_for_pdf") if is_oa else None
-            return is_oa, pdf_url
-    except Exception:
-        pass
+            return is_oa, data.get("best_oa_location", {}).get("url_for_pdf") if is_oa else None
+    except: pass
     return False, None
 
-# 2. Pestaña de Búsqueda (Fase 1)
 with tabs[0]:
-    st.header("Búsqueda en PubMed")
+    st.header("Búsqueda Avanzada en PubMed")
     
     with st.form("search_form"):
-        query = st.text_input("Query de PubMed", value="Anterior Cruciate Ligament Reconstruction[MeSH]")
-        email = st.text_input("Correo electrónico (Requerido por APIs)")
-        min_evidence = st.slider("Nivel de Evidencia Mínimo (1=Meta-análisis, 5=Reportes de caso)", 1, 5, 5)
-        submit = st.form_submit_button("Buscar Artículos")
+        col1, col2 = st.columns(2)
+        with col1:
+            query = st.text_input("Query de PubMed", value="Anterior Cruciate Ligament Reconstruction[MeSH]")
+            email = st.text_input("Correo electrónico", value="tu_correo@ejemplo.com")
+            free_only = st.checkbox("Solo artículos Free Full Text", value=False)
+        
+        with col2:
+            current_year = datetime.now().year
+            year_range = st.slider("Rango de Publicación", 2000, current_year, (current_year-5, current_year))
+            max_results = st.number_input("Artículos a extraer (Retmax)", min_value=10, max_value=500, value=100, step=10)
+            min_evidence = st.slider("Nivel Evidencia Mínimo (1=Meta-análisis, 5=Todos)", 1, 5, 5)
+            
+        submit = st.form_submit_button("Ejecutar Búsqueda")
 
     if submit:
-        if not query or not email:
-            st.error("Por favor, completa el query y el correo electrónico.")
+        if not query or not email or email == "tu_correo@ejemplo.com":
+            st.error("Por favor, ingresa un query válido y tu correo electrónico real.")
         else:
-            with st.spinner("Conectando con PubMed..."):
+            with st.spinner("Consultando NCBI E-utilities..."):
                 Entrez.email = email
                 try:
-                    handle = Entrez.esearch(db="pubmed", term=query, retmax=50)
+                    # Ensamblaje del query con filtros
+                    final_query = query
+                    if free_only:
+                        final_query += ' AND "loattrfree full text"[sb]'
+
+                    # E-search con parámetros de fecha y límite
+                    handle = Entrez.esearch(
+                        db="pubmed", 
+                        term=final_query, 
+                        retmax=max_results,
+                        mindate=str(year_range[0]),
+                        maxdate=str(year_range[1]),
+                        datetype="pdat"
+                    )
                     record = Entrez.read(handle)
                     handle.close()
                     pmids = record["IdList"]
 
                     if not pmids:
-                        st.warning("No se encontraron resultados.")
+                        st.warning("No se encontraron resultados con estos filtros.")
                     else:
+                        st.info(f"Se identificaron {len(pmids)} PMIDs. Extrayendo metadatos...")
                         fetch_handle = Entrez.efetch(db="pubmed", id=",".join(pmids), retmode="xml")
                         articles = Entrez.read(fetch_handle)
                         fetch_handle.close()
@@ -82,7 +93,6 @@ with tabs[0]:
                         for article in articles.get('PubmedArticle', []):
                             medline = article['MedlineCitation']
                             article_data = medline['Article']
-
                             pmid = str(medline['PMID'])
                             title = article_data.get('ArticleTitle', 'Sin título')
                             year = article_data.get('Journal', {}).get('JournalIssue', {}).get('PubDate', {}).get('Year', 'N/A')
@@ -90,12 +100,7 @@ with tabs[0]:
                             authors = article_data.get('AuthorList', [])
                             first_author = f"{authors[0].get('LastName', '')} {authors[0].get('Initials', '')}" if authors else "N/A"
 
-                            doi = ""
-                            for a_id in article.get('PubmedData', {}).get('ArticleIdList', []):
-                                if a_id.attributes.get('IdType') == 'doi':
-                                    doi = str(a_id)
-                                    break
-
+                            doi = next((str(a_id) for a_id in article.get('PubmedData', {}).get('ArticleIdList', []) if a_id.attributes.get('IdType') == 'doi'), "")
                             ev_level = get_evidence_level(article_data.get('PublicationTypeList', []))
 
                             if ev_level <= min_evidence:
@@ -105,32 +110,22 @@ with tabs[0]:
                                     "DOI": doi,
                                     "Título": title,
                                     "Año": year,
-                                    "Primer Autor": first_author,
-                                    "Nivel Evidencia": ev_level,
-                                    "Open Access": "Sí" if is_oa else "No",
+                                    "Autor": first_author,
+                                    "Nivel": ev_level,
+                                    "Open Access": "Sí" if is_oa or free_only else "No",
                                     "PDF URL": pdf_url if pdf_url else "N/A"
                                 })
 
                         if results:
                             df = pd.DataFrame(results)
                             st.dataframe(df, use_container_width=True)
-
                             csv = df.to_csv(index=False).encode('utf-8')
-                            st.download_button(
-                                label="Descargar Tabla (CSV)",
-                                data=csv,
-                                file_name="pubmed_resultados.csv",
-                                mime="text/csv"
-                            )
+                            st.download_button("Descargar Tabla (CSV)", data=csv, file_name="pubmed_filtrado.csv", mime="text/csv")
                         else:
-                            st.warning("Los resultados no cumplen con el nivel de evidencia filtrado.")
+                            st.warning("Los artículos encontrados no cumplen el Nivel de Evidencia requerido.")
 
                 except Exception as e:
-                    st.error(f"Error de conexión: {e}")
+                    st.error(f"Error en la ejecución: {e}")
 
-# 3. Pestañas en Desarrollo
-with tabs[1]:
-    st.info("En desarrollo...")
-
-with tabs[2]:
-    st.info("En desarrollo...")
+with tabs[1]: st.info("En desarrollo...")
+with tabs[2]: st.info("En desarrollo...")
