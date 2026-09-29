@@ -227,53 +227,101 @@ with tabs[1]:
                     mime="application/zip"
                 )
 
-# --- PESTAÑA 3: MARKDOWN (Cero-Disco) ---
+# --- PESTAÑA 3: MARKDOWN (Cero-Disco + Subida Manual) ---
 with tabs[2]:
-    st.header("Conversión a Markdown estructurado")
+    st.header("Conversión a Markdown Estructurado")
     
-    if 'docs_buffers' not in st.session_state or not st.session_state['docs_buffers']:
-        st.info("No hay documentos en caché. Ejecuta las extracciones de la Fase 2 primero.")
-    else:
-        docs = st.session_state['docs_buffers']
-        st.metric("Documentos en memoria listos", len(docs))
-        
-        if st.button("Convertir a Markdown", type="primary"):
+    # 1. Inventario de memoria (Fase 2)
+    docs_en_memoria = st.session_state.get('docs_buffers', {})
+    st.metric("Documentos capturados en la Fase 2 (RAM)", len(docs_en_memoria))
+    
+    # 2. Nueva Opción: Subida manual de archivos locales
+    st.subheader("Carga Manual (Opcional)")
+    st.info("Sube PDFs que hayas descargado en la Fase 2 o desde cualquier otra fuente para convertirlos.")
+    archivos_subidos = st.file_uploader("Arrastra aquí tus archivos PDF o TXT", type=["pdf", "txt"], accept_multiple_files=True)
+    
+    if len(docs_en_memoria) > 0 or archivos_subidos:
+        if st.button("Convertir a Markdown y Descargar ZIP", type="primary"):
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             zip_md_buffer = io.BytesIO()
             
+            # Se abre el ZIP en memoria
             with zipfile.ZipFile(zip_md_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                total = len(docs)
                 
-                for i, (pmid, data) in enumerate(docs.items()):
-                    status_text.text(f"Procesando estructuración para PMID: {pmid} ({i+1}/{total})")
+                total_memoria = len(docs_en_memoria)
+                total_subidos = len(archivos_subidos) if archivos_subidos else 0
+                total = total_memoria + total_subidos
+                
+                contador = 0
+                errores = 0
+                
+                # Procesamiento A: Documentos de la memoria (Fase 2)
+                for pmid, data in docs_en_memoria.items():
+                    contador += 1
+                    status_text.text(f"Procesando memoria (PMID: {pmid}) - ({contador}/{total})")
                     md_text = ""
                     
                     try:
                         if data["tipo"] == "pdf":
-                            # Apertura de stream binario directo sin tocar disco
                             doc = fitz.open(stream=data["contenido"], filetype="pdf")
                             md_text = pymupdf4llm.to_markdown(doc)
                             doc.close()
                         elif data["tipo"] == "txt":
-                            # Decodificación UTF-8 para raspado de frontend
-                            md_text = data["contenido"].decode('utf-8')
+                            # SOLUCIÓN: Ya es un 'str', no requiere decode()
+                            md_text = data["contenido"]
                         
                         if md_text:
                             zip_file.writestr(f"{pmid}.md", md_text.encode('utf-8'))
-                            
                     except Exception as e:
-                        st.toast(f"Error de parsing en {pmid}: {str(e)[:50]}")
+                        st.toast(f"Error en buffer {pmid}: {str(e)[:50]}")
+                        errores += 1
+                        
+                    progress_bar.progress(contador / total)
                     
-                    progress_bar.progress((i + 1) / total)
+                # Procesamiento B: Documentos subidos manualmente
+                if archivos_subidos:
+                    for archivo in archivos_subidos:
+                        contador += 1
+                        nombre_base = os.path.splitext(archivo.name)[0]
+                        status_text.text(f"Procesando archivo local: {archivo.name} - ({contador}/{total})")
+                        md_text = ""
+                        
+                        try:
+                            if archivo.name.lower().endswith(".pdf"):
+                                # Leer los bytes del archivo subido
+                                doc = fitz.open(stream=archivo.read(), filetype="pdf")
+                                md_text = pymupdf4llm.to_markdown(doc)
+                                doc.close()
+                            elif archivo.name.lower().endswith(".txt"):
+                                # Como viene del disco, sí es necesario decodificar los bytes
+                                md_text = archivo.read().decode('utf-8', errors='ignore')
+                            
+                            if md_text:
+                                zip_file.writestr(f"{nombre_base}.md", md_text.encode('utf-8'))
+                        except Exception as e:
+                            st.toast(f"Error en {archivo.name}: {str(e)[:50]}")
+                            errores += 1
+                            
+                        progress_bar.progress(contador / total)
             
-            status_text.text("✅ Transformación a Markdown finalizada.")
-            st.success(f"Archivos .md compilados exitosamente en la RAM.")
+            # Resumen de operaciones
+            status_text.text("✅ Proceso completado.")
+            if errores > 0:
+                st.warning(f"Finalizado con {errores} errores. Revisa los mensajes flotantes.")
+            else:
+                st.success("¡Todos los archivos convertidos exitosamente!")
             
-            st.download_button(
-                label="📦 Descargar markdowns.zip",
-                data=zip_md_buffer.getvalue(),
-                file_name="markdowns.zip",
-                mime="application/zip"
-            )
+            # Generar botón de descarga si el ZIP tiene peso
+            if zip_md_buffer.tell() > 22: # 22 bytes es un ZIP completamente vacío
+                st.download_button(
+                    label="📦 Descargar markdowns.zip",
+                    data=zip_md_buffer.getvalue(),
+                    file_name="markdowns_generados.zip",
+                    mime="application/zip"
+                )
+            else:
+                st.error("No se pudo extraer texto de ninguno de los documentos.")
+    else:
+        st.info("Ejecuta la Fase 2 o sube archivos manualmente para iniciar la conversión.")
